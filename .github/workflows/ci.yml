@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: merchantreview
+          POSTGRES_USER: merchantreview
+          POSTGRES_PASSWORD: merchantreview
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U merchantreview"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: merchantreview
+      POSTGRES_USER: merchantreview
+      POSTGRES_PASSWORD: merchantreview
+      REDIS_URL: redis://localhost:6379/0
+      DJANGO_SECRET_KEY: ci-test-key
+      DJANGO_DEBUG: "False"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Django system check
+        run: python manage.py check
+
+      - name: Run migrations
+        run: python manage.py migrate --noinput
+
+      - name: Run tests
+        run: python manage.py test --verbosity=2
