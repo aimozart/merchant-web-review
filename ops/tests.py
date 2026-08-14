@@ -1,0 +1,187 @@
+from django.test import TestCase
+from rest_framework.test import APIClient
+
+from ops import faults, infra_faults, network_faults
+from ops.faults import FAILURE_SPIKE_MARKER
+from ops.models import OpsFlag, Ticket
+from reviews.models import Merchant, RiskSignal, WebPresenceReview
+
+
+class OpsFlagTests(TestCase):
+    def test_is_set_false_when_absent(self):
+        self.assertFalse(OpsFlag.is_set("nonexistent"))
+
+    def test_set_flag_then_is_set(self):
+        OpsFlag.set_flag("some_flag", True, note="test")
+        self.assertTrue(OpsFlag.is_set("some_flag"))
+        OpsFlag.set_flag("some_flag", False)
+        self.assertFalse(OpsFlag.is_set("some_flag"))
+
+
+class TicketModelTests(TestCase):
+    def test_str(self):
+        ticket = Ticket.objects.create(title="Something broke", priority="high")
+        self.assertIn("Something broke", str(ticket))
+
+
+class Tier1FaultRegistryTests(TestCase):
+    """
+    Full inject -> stays-broken -> real-fix -> resolves loop for every Tier 1
+    fault. These are pure Django/model faults, so — unlike Tiers 2-3 — they can
+    run in any environment without Docker or LocalStack, which is exactly why
+    Tier 1 is the one with full automated coverage here.
+    """
+
+    def test_every_fault_is_well_formed(self):
+        for key, fault in faults.FAULTS.items():
+            self.assertEqual(fault.key, key)
+            self.assertTrue(fault.title)
+            self.assertTrue(fault.description)
+            self.assertTrue(fault.real_cause)
+            self.assertTrue(fault.fix_hint)
+            self.assertIn(fault.priority, dict(Ticket.PRIORITY_CHOICES))
+            self.assertIn(fault.category, dict(Ticket.CATEGORY_CHOICES))
+
+    def test_stuck_review_lifecycle(self):
+        ticket = faults.inject_fault("stuck_review")
+        self.assertEqual(ticket.status, "open")
+        self.assertFalse(faults.verify_fix(ticket))
+
+        review = WebPresenceReview.objects.get(id=ticket.related_review_id)
+        review.status = "complete"
+        review.save(update_fields=["status"])
+
+        self.assertTrue(faults.verify_fix(ticket))
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.status, "resolved")
+        self.assertIsNotNone(ticket.resolved_at)
+
+    def test_overdue_monitoring_lifecycle(self):
+        ticket = faults.inject_fault("overdue_monitoring")
+        self.assertFalse(faults.verify_fix(ticket))
+
+        WebPresenceReview.objects.create(
+            merchant_id=ticket.related_merchant_id, status="complete"
+        )
+
+        self.assertTrue(faults.verify_fix(ticket))
+
+    def test_llm_degraded_lifecycle(self):
+        ticket = faults.inject_fault("llm_degraded")
+        self.assertTrue(OpsFlag.is_set("llm_analysis_disabled"))
+        self.assertFalse(faults.verify_fix(ticket))
+
+        OpsFlag.set_flag("llm_analysis_disabled", False)
+
+        self.assertTrue(faults.verify_fix(ticket))
+
+    def test_bad_signal_category_lifecycle(self):
+        ticket = faults.inject_fault("bad_signal_category")
+        self.assertFalse(faults.verify_fix(ticket))
+
+        RiskSignal.objects.filter(review_id=ticket.related_review_id).update(category="content")
+
+        self.assertTrue(faults.verify_fix(ticket))
+
+    def test_failure_spike_lifecycle(self):
+        ticket = faults.inject_fault("failure_spike")
+        self.assertEqual(
+            WebPresenceReview.objects.filter(
+                status="failed", error_message=FAILURE_SPIKE_MARKER
+            ).count(),
+            5,
+        )
+        self.assertFalse(faults.verify_fix(ticket))
+
+        WebPresenceReview.objects.filter(
+            status="failed", error_message=FAILURE_SPIKE_MARKER
+        ).update(status="complete", error_message="")
+
+        self.assertTrue(faults.verify_fix(ticket))
+
+    def test_verify_fix_returns_false_for_unknown_fault_key(self):
+        ticket = Ticket.objects.create(title="mystery", fault_key="does_not_exist")
+        self.assertFalse(faults.verify_fix(ticket))
+
+    def test_get_or_create_demo_merchant_is_idempotent(self):
+        m1 = faults._get_or_create_demo_merchant()
+        m2 = faults._get_or_create_demo_merchant()
+        self.assertEqual(m1.id, m2.id)
+        self.assertEqual(Merchant.objects.filter(website_url=m1.website_url).count(), 1)
+
+
+class Tier2And3RegistrySanityTests(TestCase):
+    """
+    Tiers 2 (Docker) and 3 (real AWS/LocalStack) can't be exercised end-to-end in
+    a plain test run — they require a live Docker Compose stack and a running
+    LocalStack + `pulumi up`'d infra stack respectively. What *can* and should be
+    verified in any environment is that every fault definition is complete and
+    internally consistent, so a missing field or typo'd category fails fast in
+    CI rather than only being discovered the next time someone runs the drill
+    by hand against real infrastructure.
+    """
+
+    def test_every_infra_fault_is_well_formed(self):
+        for key, fault in infra_faults.INFRA_FAULTS.items():
+            self.assertEqual(fault.key, key)
+            self.assertTrue(fault.title)
+            self.assertTrue(fault.description)
+            self.assertTrue(fault.real_cause)
+            self.assertTrue(fault.fix_hint)
+            self.assertIn(fault.priority, dict(Ticket.PRIORITY_CHOICES))
+            self.assertIn(fault.category, dict(Ticket.CATEGORY_CHOICES))
+            self.assertTrue(callable(fault.inject))
+            self.assertTrue(callable(fault.check_resolved))
+
+    def test_every_network_fault_is_well_formed(self):
+        for key, fault in network_faults.NETWORK_FAULTS.items():
+            self.assertEqual(fault.key, key)
+            self.assertTrue(fault.title)
+            self.assertTrue(fault.description)
+            self.assertTrue(fault.real_cause)
+            self.assertTrue(fault.fix_hint)
+            self.assertIn(fault.priority, dict(Ticket.PRIORITY_CHOICES))
+            self.assertIn(fault.category, dict(Ticket.CATEGORY_CHOICES))
+            self.assertTrue(callable(fault.inject))
+            self.assertTrue(callable(fault.check_resolved))
+
+
+class TicketApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_inject_tier1_random_fault_via_api(self):
+        response = self.client.post("/api/tickets/inject/", {"tier": 1}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertIn(response.data["title"], [f.title for f in faults.FAULTS.values()])
+
+    def test_inject_unknown_fault_key_returns_400(self):
+        response = self.client.post(
+            "/api/tickets/inject/", {"tier": 1, "fault_key": "nonexistent"}, format="json"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_verify_and_close_full_loop(self):
+        inject_response = self.client.post(
+            "/api/tickets/inject/", {"tier": 1, "fault_key": "llm_degraded"}, format="json"
+        )
+        ticket_id = inject_response.data["id"]
+
+        verify_response = self.client.post(f"/api/tickets/{ticket_id}/verify/")
+        self.assertFalse(verify_response.data["resolved"])
+
+        close_attempt = self.client.post(f"/api/tickets/{ticket_id}/close/")
+        self.assertEqual(close_attempt.status_code, 400)
+
+        OpsFlag.set_flag("llm_analysis_disabled", False)
+        verify_response = self.client.post(f"/api/tickets/{ticket_id}/verify/")
+        self.assertTrue(verify_response.data["resolved"])
+
+        close_response = self.client.post(f"/api/tickets/{ticket_id}/close/")
+        self.assertEqual(close_response.status_code, 200)
+        self.assertEqual(close_response.data["status"], "closed")
+
+    def test_verify_non_fault_ticket_returns_400(self):
+        ticket = Ticket.objects.create(title="manual ticket")
+        response = self.client.post(f"/api/tickets/{ticket.id}/verify/")
+        self.assertEqual(response.status_code, 400)
