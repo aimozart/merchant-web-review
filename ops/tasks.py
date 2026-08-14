@@ -14,9 +14,13 @@ instead of a one-shot demo:
 """
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import random
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 from celery import shared_task
@@ -28,11 +32,88 @@ logger = logging.getLogger(__name__)
 
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
 
-# This task is scheduled hourly (see `seed_periodic_tasks`). Targeting roughly
-# one page per two days of practice means an expected value of ~1 event per
-# 48 hourly runs — real on-call is mostly silence punctuated by rare pages,
-# not several incidents a shift.
-PAGE_PROBABILITY_PER_HOURLY_CHECK = 1 / 48
+# Only page during an actual shift — real on-call doesn't page you while
+# you're off, and paging through someone's sleep window defeats the point of
+# practicing a realistic on-call cadence rather than just testing whether
+# notifications work.
+ONCALL_TIMEZONE = ZoneInfo(os.environ.get("ONCALL_TIMEZONE", "America/Phoenix"))
+ONCALL_SHIFT_START_HOUR = int(os.environ.get("ONCALL_SHIFT_START_HOUR", "14"))  # 2pm
+ONCALL_SHIFT_END_HOUR = int(os.environ.get("ONCALL_SHIFT_END_HOUR", "23"))  # 11pm
+
+# This task is scheduled hourly (see `seed_periodic_tasks`), and only actually
+# rolls during the shift window above. Targeting roughly one page per two days
+# of practice means an expected value of ~1 event per 48 in-shift hourly runs
+# (9 shift-hours/day * 2 days = 18 checks — see `PAGE_PROBABILITY_PER_HOURLY_CHECK`
+# below, sized off the shift length rather than a flat 24h day).
+PAGE_PROBABILITY_PER_HOURLY_CHECK = 1 / 18
+
+
+def _within_shift_hours() -> bool:
+    hour = datetime.now(tz=ONCALL_TIMEZONE).hour
+    return ONCALL_SHIFT_START_HOUR <= hour < ONCALL_SHIFT_END_HOUR
+
+# A single push only buzzes a phone briefly by OS design — no amount of ntfy
+# "priority" tuning turns a normal notification into an alarm-clock-grade
+# alert. What actually works, and is fully under our control server-side, is
+# sending several distinct notifications a short interval apart: each one
+# re-triggers the phone's vibration independently. Escalation keeps repeating
+# until the ticket is acknowledged (via the notification's tap-to-acknowledge
+# action button — see ops/views.py TicketViewSet.acknowledge) or a bounded
+# max duration is reached, so a truly-unanswered page doesn't tie up a Celery
+# worker indefinitely.
+PAGE_ESCALATION_INTERVAL_SECONDS = 20
+PAGE_ESCALATION_MAX_ATTEMPTS = 30  # ~10 minutes at the interval above
+
+ONCALL_ACK_BASE_URL = os.environ.get("ONCALL_ACK_BASE_URL", "")
+
+
+def _mime_encode_header(text: str) -> str:
+    """HTTP headers are restricted to latin-1 — plain non-ASCII text (e.g. an
+    em-dash in a ticket title) raises UnicodeEncodeError deep inside urllib3
+    before the request is even sent. ntfy documents RFC 2047 MIME
+    encoded-word syntax as the fix for exactly this."""
+    if text.isascii():
+        return text
+    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    return f"=?UTF-8?B?{encoded}?="
+
+
+def _send_page_notification(ticket: Ticket) -> None:
+    if not NTFY_TOPIC:
+        logger.warning("NTFY_TOPIC not configured — page fired but no notification sent")
+        return
+
+    priority = {"critical": "urgent", "high": "high"}.get(ticket.priority, "default")
+    headers = {
+        "Title": _mime_encode_header(f"[PAGE] {ticket.title}"),
+        "Priority": priority,
+        "Tags": "rotating_light",
+    }
+    if ONCALL_ACK_BASE_URL:
+        headers["Actions"] = (
+            f"http, Acknowledge, {ONCALL_ACK_BASE_URL}/api/tickets/{ticket.id}/acknowledge/, "
+            "method=POST, clear=true"
+        )
+
+    for attempt in range(PAGE_ESCALATION_MAX_ATTEMPTS):
+        try:
+            requests.post(
+                f"https://ntfy.sh/{NTFY_TOPIC}",
+                data=ticket.description.encode("utf-8"),
+                headers=headers,
+                timeout=5,
+            )
+        except Exception:
+            logger.exception("Failed to send on-call page notification (attempt %d)", attempt + 1)
+
+        time.sleep(PAGE_ESCALATION_INTERVAL_SECONDS)
+
+        ticket.refresh_from_db()
+        if ticket.status != "open":
+            logger.info("Page acknowledged after %d attempt(s): %s", attempt + 1, ticket.title)
+            return
+
+    logger.warning("Page escalation timed out unacknowledged: %s", ticket.title)
 
 
 def _docker_reachable() -> bool:
@@ -83,27 +164,12 @@ def replenish_ticket() -> str:
 
 @shared_task
 def maybe_page_oncall() -> str | None:
+    if not _within_shift_hours():
+        return None
     if random.random() >= PAGE_PROBABILITY_PER_HOURLY_CHECK:
         return None
 
     ticket = _inject_from_available_tier(prefer_reliable=True)
-
-    if NTFY_TOPIC:
-        try:
-            requests.post(
-                f"https://ntfy.sh/{NTFY_TOPIC}",
-                data=ticket.description.encode("utf-8"),
-                headers={
-                    "Title": f"[PAGE] {ticket.title}",
-                    "Priority": {"critical": "urgent", "high": "high"}.get(ticket.priority, "default"),
-                    "Tags": "rotating_light",
-                },
-                timeout=5,
-            )
-        except Exception:
-            logger.exception("Failed to send on-call page notification")
-    else:
-        logger.warning("NTFY_TOPIC not configured — page fired but no notification sent")
-
+    _send_page_notification(ticket)
     logger.warning("On-call page fired: %s", ticket.title)
     return str(ticket.id)

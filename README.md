@@ -128,25 +128,40 @@ LocalStack's up), so it degrades gracefully if you're only running the Django/Ce
 
 ### On-call paging
 
-`ops/tasks.py::maybe_page_oncall` runs hourly via Celery Beat and, on a low-probability roll
-(tuned for roughly one page per two days of practice — real on-call is mostly quiet, not several
-incidents a shift), injects a Tier 1 fault and pushes a real notification to your phone via
-[ntfy.sh](https://ntfy.sh) — free, no account, no cost. Deliberately independent of any chat/
-Claude session being open, since a real on-call shift doesn't require that either.
+`ops/tasks.py::maybe_page_oncall` runs hourly via Celery Beat, only during a configured shift
+window (default 2pm-11pm `America/Phoenix`, both configurable via `ONCALL_SHIFT_START_HOUR`/
+`ONCALL_SHIFT_END_HOUR`/`ONCALL_TIMEZONE` — no paging outside a shift, same as real on-call). On a
+low-probability roll within shift hours (tuned for roughly one page per two days of practice —
+real on-call is mostly quiet, not several incidents a shift), it injects a Tier 1 fault and starts
+paging your phone via [ntfy.sh](https://ntfy.sh) — free, no account, no cost, and deliberately
+independent of any chat/Claude session being open, since a real on-call shift doesn't require
+that either.
+
+A page **escalates**: it resends every ~20s (each one re-triggers your phone's vibration — a
+single push only buzzes briefly by OS design, no priority setting changes that) for up to ~10
+minutes, or until acknowledged — whichever comes first. Acknowledging is a single tap: expand the
+notification and tap **Acknowledge**, which fires a request straight to your dev machine
+(`ops/views.py::TicketViewSet.acknowledge`) and stops the loop, no need to open any app.
 
 Setup:
 ```bash
 # 1. Install the ntfy app (App Store / Play Store), subscribe to a private topic you make up.
-# 2. Put that topic name in .env:
+# 2. Put that topic name in .env, plus the LAN address your phone can reach this machine at
+#    (needed for the tap-to-acknowledge button):
 echo "NTFY_TOPIC=your-private-topic-name" >> .env
+echo "ONCALL_ACK_BASE_URL=http://<your-machine's-LAN-IP>:8000" >> .env
 
 # 3. Seed the periodic tasks (idempotent, safe to re-run):
 python manage.py seed_periodic_tasks
 
-# 4. Run Celery Beat alongside the worker:
+# 4. Run the dev server bound to 0.0.0.0, not just 127.0.0.1, so your phone can reach it:
+python manage.py runserver 0.0.0.0:8000
+
+# 5. Run Celery Beat alongside the worker:
 celery -A merchantreview beat -l info
 
-# Verify your topic is wired up correctly without waiting for the random roll:
+# Fire a real test page (escalates/acknowledges exactly like a real one) without waiting
+# for the random roll or the shift window:
 python manage.py send_test_page
 ```
 

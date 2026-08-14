@@ -60,6 +60,18 @@ class TicketViewSet(viewsets.ModelViewSet):
         return Response({"resolved": resolved, "ticket": TicketSerializer(ticket).data})
 
     @action(detail=True, methods=["post"])
+    def acknowledge(self, request, pk=None):
+        """Hit by the tap-to-acknowledge action button on an on-call page
+        notification (see ops/tasks.py) — stops the paging escalation loop.
+        Deliberately unauthenticated: this is a LAN-only personal practice
+        tool, and the ntfy action button can't carry credentials."""
+        ticket = self.get_object()
+        if ticket.status == "open":
+            ticket.status = "in_progress"
+            ticket.save(update_fields=["status"])
+        return Response(TicketSerializer(ticket).data)
+
+    @action(detail=True, methods=["post"])
     def close(self, request, pk=None):
         ticket = self.get_object()
         if ticket.status != "resolved":

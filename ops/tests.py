@@ -210,8 +210,9 @@ class ReplenishAndPagingTaskTests(TestCase):
         self.assertEqual(ticket.status, "open")
         self.assertEqual(ticket.source, "fault_injection")
 
+    @patch("ops.tasks._within_shift_hours", return_value=True)
     @patch("ops.tasks.random.random", return_value=0.99)
-    def test_maybe_page_oncall_usually_does_nothing(self, mock_random):
+    def test_maybe_page_oncall_usually_does_nothing(self, mock_random, mock_shift):
         before = Ticket.objects.count()
 
         result = tasks.maybe_page_oncall()
@@ -219,36 +220,77 @@ class ReplenishAndPagingTaskTests(TestCase):
         self.assertIsNone(result)
         self.assertEqual(Ticket.objects.count(), before)
 
+    @patch("ops.tasks.random.random", return_value=0.0)
+    def test_maybe_page_oncall_never_fires_outside_shift_hours(self, mock_random):
+        with patch("ops.tasks._within_shift_hours", return_value=False):
+            result = tasks.maybe_page_oncall()
+
+        self.assertIsNone(result)
+
+    @patch("ops.tasks.time.sleep")
     @patch("ops.tasks.requests.post")
     @patch("ops.tasks.NTFY_TOPIC", "test-topic")
     @patch("ops.tasks._localstack_reachable", return_value=False)
     @patch("ops.tasks._docker_reachable", return_value=False)
+    @patch("ops.tasks._within_shift_hours", return_value=True)
     @patch("ops.tasks.random.random", return_value=0.0)
-    def test_maybe_page_oncall_fires_and_notifies_when_probability_hits(
-        self, mock_random, mock_docker, mock_localstack, mock_post
+    def test_maybe_page_oncall_fires_and_stops_once_acknowledged(
+        self, mock_random, mock_shift, mock_docker, mock_localstack, mock_post, mock_sleep
     ):
+        # Simulate the tap-to-acknowledge action landing during the first wait —
+        # the escalation loop should notice on its next check and stop.
+        def ack_during_wait(*args, **kwargs):
+            Ticket.objects.filter(status="open").update(status="in_progress")
+
+        mock_sleep.side_effect = ack_during_wait
+
         result = tasks.maybe_page_oncall()
 
         self.assertIsNotNone(result)
         ticket = Ticket.objects.get(id=result)
-        self.assertEqual(ticket.source, "fault_injection")
+        self.assertEqual(ticket.status, "in_progress")
         mock_post.assert_called_once()
         args, kwargs = mock_post.call_args
         self.assertEqual(args[0], "https://ntfy.sh/test-topic")
         self.assertIn(ticket.title, kwargs["headers"]["Title"])
 
+    @patch("ops.tasks.time.sleep")
     @patch("ops.tasks.requests.post")
     @patch("ops.tasks.NTFY_TOPIC", "")
     @patch("ops.tasks._localstack_reachable", return_value=False)
     @patch("ops.tasks._docker_reachable", return_value=False)
+    @patch("ops.tasks._within_shift_hours", return_value=True)
     @patch("ops.tasks.random.random", return_value=0.0)
     def test_maybe_page_oncall_fires_silently_without_ntfy_topic_configured(
-        self, mock_random, mock_docker, mock_localstack, mock_post
+        self, mock_random, mock_shift, mock_docker, mock_localstack, mock_post, mock_sleep
     ):
         result = tasks.maybe_page_oncall()
 
         self.assertIsNotNone(result)
         mock_post.assert_not_called()
+        mock_sleep.assert_not_called()
+
+    def test_acknowledge_action_stops_escalation_signal(self):
+        """The acknowledge API action itself — the loop-stopping side effect
+        is exercised above via the mocked escalation test."""
+        ticket = Ticket.objects.create(title="paged", fault_key="stuck_review", status="open")
+        client = APIClient()
+
+        response = client.post(f"/api/tickets/{ticket.id}/acknowledge/")
+
+        self.assertEqual(response.status_code, 200)
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.status, "in_progress")
+
+    def test_acknowledge_is_idempotent_for_already_resolved_ticket(self):
+        ticket = Ticket.objects.create(title="paged", status="resolved")
+        client = APIClient()
+
+        response = client.post(f"/api/tickets/{ticket.id}/acknowledge/")
+
+        self.assertEqual(response.status_code, 200)
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.status, "resolved")
 
 
 class CloseTicketReplenishmentTests(TestCase):
