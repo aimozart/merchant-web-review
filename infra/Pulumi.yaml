@@ -1,0 +1,9 @@
+name: merchant-web-review-infra
+runtime:
+  name: python
+  options:
+    virtualenv: ../venv
+description: >
+  AWS infrastructure for the merchant web-presence review service:
+  ECS Fargate service, RDS Postgres, ElastiCache Redis, and an S3 snapshot bucket.
+  Designed to run identically against LocalStack (local) or real AWS (prod).
