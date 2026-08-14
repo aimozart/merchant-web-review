@@ -118,6 +118,38 @@ Also reachable through the same `Ticket` API the React "Ops / Tickets" page uses
 `POST /api/tickets/inject/` (`{"tier": 1|2|3, "fault_key": "..."}`),
 `POST /api/tickets/{id}/verify/`, `POST /api/tickets/{id}/close/`.
 
+### Auto-replenishing queue
+
+Closing a ticket automatically queues one new random fault (`ops/tasks.py::replenish_ticket`,
+fired from the `close` API action) — the point is a standing practice queue for an open-ended
+8-10 hour session, not a fixed set of exercises that runs out. It prefers whichever tiers are
+actually reachable at that moment (Tier 1 always; Tier 2 if Docker's reachable; Tier 3 if
+LocalStack's up), so it degrades gracefully if you're only running the Django/Celery layer.
+
+### On-call paging
+
+`ops/tasks.py::maybe_page_oncall` runs hourly via Celery Beat and, on a low-probability roll
+(tuned for roughly one page per two days of practice — real on-call is mostly quiet, not several
+incidents a shift), injects a Tier 1 fault and pushes a real notification to your phone via
+[ntfy.sh](https://ntfy.sh) — free, no account, no cost. Deliberately independent of any chat/
+Claude session being open, since a real on-call shift doesn't require that either.
+
+Setup:
+```bash
+# 1. Install the ntfy app (App Store / Play Store), subscribe to a private topic you make up.
+# 2. Put that topic name in .env:
+echo "NTFY_TOPIC=your-private-topic-name" >> .env
+
+# 3. Seed the periodic tasks (idempotent, safe to re-run):
+python manage.py seed_periodic_tasks
+
+# 4. Run Celery Beat alongside the worker:
+celery -A merchantreview beat -l info
+
+# Verify your topic is wired up correctly without waiting for the random roll:
+python manage.py send_test_page
+```
+
 ## Infrastructure as code
 
 `infra/` is a Pulumi (Python) program describing the AWS deployment target: a VPC with public/

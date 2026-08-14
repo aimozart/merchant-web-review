@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from . import faults, infra_faults, network_faults
 from .models import Ticket
 from .serializers import TicketSerializer
+from .tasks import replenish_ticket
 
 
 class TicketViewSet(viewsets.ModelViewSet):
@@ -69,4 +70,5 @@ class TicketViewSet(viewsets.ModelViewSet):
         ticket.status = "closed"
         ticket.resolution_notes = request.data.get("resolution_notes", ticket.resolution_notes)
         ticket.save(update_fields=["status", "resolution_notes"])
+        replenish_ticket.delay()
         return Response(TicketSerializer(ticket).data)

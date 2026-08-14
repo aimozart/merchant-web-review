@@ -1,7 +1,9 @@
+from unittest.mock import patch
+
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from ops import faults, infra_faults, network_faults
+from ops import faults, infra_faults, network_faults, tasks
 from ops.faults import FAILURE_SPIKE_MARKER
 from ops.models import OpsFlag, Ticket
 from reviews.models import Merchant, RiskSignal, WebPresenceReview
@@ -185,3 +187,79 @@ class TicketApiTests(TestCase):
         ticket = Ticket.objects.create(title="manual ticket")
         response = self.client.post(f"/api/tickets/{ticket.id}/verify/")
         self.assertEqual(response.status_code, 400)
+
+
+class ReplenishAndPagingTaskTests(TestCase):
+    """
+    Docker/LocalStack are deliberately mocked as unreachable in every test here
+    so these run identically in CI (no Docker socket, no LocalStack) and on a
+    laptop with the full stack up — they test the *decision logic*, not Tiers
+    2-3's actual infrastructure calls (covered separately by the registry
+    sanity tests and by hand against the real stack).
+    """
+
+    @patch("ops.tasks._localstack_reachable", return_value=False)
+    @patch("ops.tasks._docker_reachable", return_value=False)
+    def test_replenish_ticket_creates_a_new_open_ticket(self, mock_docker, mock_localstack):
+        before = Ticket.objects.count()
+
+        ticket_id = tasks.replenish_ticket()
+
+        self.assertEqual(Ticket.objects.count(), before + 1)
+        ticket = Ticket.objects.get(id=ticket_id)
+        self.assertEqual(ticket.status, "open")
+        self.assertEqual(ticket.source, "fault_injection")
+
+    @patch("ops.tasks.random.random", return_value=0.99)
+    def test_maybe_page_oncall_usually_does_nothing(self, mock_random):
+        before = Ticket.objects.count()
+
+        result = tasks.maybe_page_oncall()
+
+        self.assertIsNone(result)
+        self.assertEqual(Ticket.objects.count(), before)
+
+    @patch("ops.tasks.requests.post")
+    @patch("ops.tasks.NTFY_TOPIC", "test-topic")
+    @patch("ops.tasks._localstack_reachable", return_value=False)
+    @patch("ops.tasks._docker_reachable", return_value=False)
+    @patch("ops.tasks.random.random", return_value=0.0)
+    def test_maybe_page_oncall_fires_and_notifies_when_probability_hits(
+        self, mock_random, mock_docker, mock_localstack, mock_post
+    ):
+        result = tasks.maybe_page_oncall()
+
+        self.assertIsNotNone(result)
+        ticket = Ticket.objects.get(id=result)
+        self.assertEqual(ticket.source, "fault_injection")
+        mock_post.assert_called_once()
+        args, kwargs = mock_post.call_args
+        self.assertEqual(args[0], "https://ntfy.sh/test-topic")
+        self.assertIn(ticket.title, kwargs["headers"]["Title"])
+
+    @patch("ops.tasks.requests.post")
+    @patch("ops.tasks.NTFY_TOPIC", "")
+    @patch("ops.tasks._localstack_reachable", return_value=False)
+    @patch("ops.tasks._docker_reachable", return_value=False)
+    @patch("ops.tasks.random.random", return_value=0.0)
+    def test_maybe_page_oncall_fires_silently_without_ntfy_topic_configured(
+        self, mock_random, mock_docker, mock_localstack, mock_post
+    ):
+        result = tasks.maybe_page_oncall()
+
+        self.assertIsNotNone(result)
+        mock_post.assert_not_called()
+
+
+class CloseTicketReplenishmentTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    @patch("ops.tasks.replenish_ticket.delay")
+    def test_closing_a_ticket_triggers_replenishment(self, mock_delay):
+        ticket = Ticket.objects.create(title="t", fault_key="llm_degraded", status="resolved")
+
+        response = self.client.post(f"/api/tickets/{ticket.id}/close/")
+
+        self.assertEqual(response.status_code, 200)
+        mock_delay.assert_called_once()
