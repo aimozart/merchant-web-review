@@ -207,6 +207,14 @@ class PageWindowTests(TestCase):
         monday_3am = datetime(2026, 8, 17, 3, 0, tzinfo=tasks.ONCALL_TIMEZONE)
         self.assertTrue(tasks._within_page_window(monday_3am))
 
+    def test_weekday_just_before_shift_start_is_within_the_window(self):
+        monday_1_59pm = datetime(2026, 8, 17, 13, 59, tzinfo=tasks.ONCALL_TIMEZONE)
+        self.assertTrue(tasks._within_page_window(monday_1_59pm))
+
+    def test_weekday_at_shift_start_is_outside_the_window(self):
+        monday_2pm = datetime(2026, 8, 17, 14, 0, tzinfo=tasks.ONCALL_TIMEZONE)
+        self.assertFalse(tasks._within_page_window(monday_2pm))
+
     def test_saturday_daytime_is_within_the_window(self):
         saturday_2pm = datetime(2026, 8, 15, 14, 0, tzinfo=tasks.ONCALL_TIMEZONE)
         self.assertTrue(tasks._within_page_window(saturday_2pm))

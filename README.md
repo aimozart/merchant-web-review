@@ -129,9 +129,9 @@ LocalStack's up), so it degrades gracefully if you're only running the Django/Ce
 ### On-call paging
 
 `ops/tasks.py::maybe_page_oncall` runs hourly via Celery Beat, only during off-hours and
-weekends — not the work shift itself (default work shift 2pm-11pm; pages are eligible 11pm-7am
-daily plus all day Saturday/Sunday, configurable via `ONCALL_OFFHOURS_START_HOUR`/
-`ONCALL_OFFHOURS_END_HOUR`/`ONCALL_TIMEZONE`). That's deliberate: during a normal work shift
+weekends — not the work shift itself (default work shift 2pm-11pm; pages are eligible 11pm-2pm,
+the full complement of that shift, plus all day Saturday/Sunday, configurable via
+`ONCALL_OFFHOURS_START_HOUR`/`ONCALL_OFFHOURS_END_HOUR`/`ONCALL_TIMEZONE`). That's deliberate: during a normal work shift
 you're already present and would just handle things directly — on-call exists specifically to
 cover the hours nobody's normally watching. On a low-probability roll within that window (tuned
 for roughly one page per two days of practice — real on-call is mostly quiet, not several

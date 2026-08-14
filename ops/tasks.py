@@ -37,18 +37,19 @@ NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
 # Real on-call pages you when the regular working hours' coverage isn't
 # there — nights and weekends, not during the workday itself (during the
 # 2pm-11pm work shift, you're already present and would just handle things
-# directly). So paging is gated to off-hours (default 11pm-7am daily) PLUS
-# all day on weekends, not the work shift.
+# directly). So paging is gated to off-hours (default 11pm-2pm daily — the
+# full complement of a 2pm-11pm work shift) PLUS all day on weekends.
 ONCALL_TIMEZONE = ZoneInfo(os.environ.get("ONCALL_TIMEZONE", "America/Phoenix"))
 ONCALL_OFFHOURS_START_HOUR = int(os.environ.get("ONCALL_OFFHOURS_START_HOUR", "23"))  # 11pm
-ONCALL_OFFHOURS_END_HOUR = int(os.environ.get("ONCALL_OFFHOURS_END_HOUR", "7"))  # 7am
+ONCALL_OFFHOURS_END_HOUR = int(os.environ.get("ONCALL_OFFHOURS_END_HOUR", "14"))  # 2pm
 
 # This task is scheduled hourly (see `seed_periodic_tasks`), and only actually
 # rolls when `_within_page_window` is true. Eligible hours per week: 5 weekday
-# nights * 8 off-hours + 2 full weekend days * 24h = 88 of 168 hours (~12.6/day
-# on average). Targeting roughly one page per two days of practice means an
-# expected value of ~1 event per ~25 eligible hourly checks.
-PAGE_PROBABILITY_PER_HOURLY_CHECK = 1 / 25
+# off-hours-nights * 15h (11pm-2pm wraps overnight) + 2 full weekend days * 24h
+# = 123 of 168 hours (~17.6/day on average). Targeting roughly one page per two
+# days of practice means an expected value of ~1 event per ~35 eligible hourly
+# checks.
+PAGE_PROBABILITY_PER_HOURLY_CHECK = 1 / 35
 
 
 def _within_page_window(now: datetime | None = None) -> bool:
