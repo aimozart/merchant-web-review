@@ -128,14 +128,16 @@ LocalStack's up), so it degrades gracefully if you're only running the Django/Ce
 
 ### On-call paging
 
-`ops/tasks.py::maybe_page_oncall` runs hourly via Celery Beat, only during a configured shift
-window (default 2pm-11pm `America/Phoenix`, both configurable via `ONCALL_SHIFT_START_HOUR`/
-`ONCALL_SHIFT_END_HOUR`/`ONCALL_TIMEZONE` — no paging outside a shift, same as real on-call). On a
-low-probability roll within shift hours (tuned for roughly one page per two days of practice —
-real on-call is mostly quiet, not several incidents a shift), it injects a Tier 1 fault and starts
-paging your phone via [ntfy.sh](https://ntfy.sh) — free, no account, no cost, and deliberately
-independent of any chat/Claude session being open, since a real on-call shift doesn't require
-that either.
+`ops/tasks.py::maybe_page_oncall` runs hourly via Celery Beat, only during off-hours and
+weekends — not the work shift itself (default work shift 2pm-11pm; pages are eligible 11pm-7am
+daily plus all day Saturday/Sunday, configurable via `ONCALL_OFFHOURS_START_HOUR`/
+`ONCALL_OFFHOURS_END_HOUR`/`ONCALL_TIMEZONE`). That's deliberate: during a normal work shift
+you're already present and would just handle things directly — on-call exists specifically to
+cover the hours nobody's normally watching. On a low-probability roll within that window (tuned
+for roughly one page per two days of practice — real on-call is mostly quiet, not several
+incidents a shift), it injects a Tier 1 fault and starts paging your phone via
+[ntfy.sh](https://ntfy.sh) — free, no account, no cost, and deliberately independent of any
+chat/Claude session being open, since a real on-call shift doesn't require that either.
 
 A page **escalates**: it resends every ~20s (each one re-triggers your phone's vibration — a
 single push only buzzes briefly by OS design, no priority setting changes that) for up to ~10

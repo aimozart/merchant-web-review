@@ -6,11 +6,13 @@ instead of a one-shot demo:
   ticket closes (see ops/views.py TicketViewSet.close), so clearing tickets is
   what produces new ones, the same shape as a real ticket queue during an
   8-10 hour practice shift.
-- `maybe_page_oncall` simulates being genuinely paged: most runs do nothing
-  (real on-call is quiet far more often than it pages), and on the rare run
-  that rolls a page, it injects a fault and pushes a real notification via
-  ntfy.sh — deliberately independent of any Claude/chat session being open,
-  since a real on-call shift doesn't require that either.
+- `maybe_page_oncall` simulates being genuinely paged: only during off-hours
+  and weekends (not the work shift itself — see `_within_page_window`), and
+  even then most runs do nothing (real on-call is quiet far more often than
+  it pages). On the rare run that rolls a page, it injects a fault and pushes
+  a real, escalating notification via ntfy.sh — deliberately independent of
+  any Claude/chat session being open, since a real on-call shift doesn't
+  require that either.
 """
 from __future__ import annotations
 
@@ -32,25 +34,30 @@ logger = logging.getLogger(__name__)
 
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
 
-# Only page during an actual shift — real on-call doesn't page you while
-# you're off, and paging through someone's sleep window defeats the point of
-# practicing a realistic on-call cadence rather than just testing whether
-# notifications work.
+# Real on-call pages you when the regular working hours' coverage isn't
+# there — nights and weekends, not during the workday itself (during the
+# 2pm-11pm work shift, you're already present and would just handle things
+# directly). So paging is gated to off-hours (default 11pm-7am daily) PLUS
+# all day on weekends, not the work shift.
 ONCALL_TIMEZONE = ZoneInfo(os.environ.get("ONCALL_TIMEZONE", "America/Phoenix"))
-ONCALL_SHIFT_START_HOUR = int(os.environ.get("ONCALL_SHIFT_START_HOUR", "14"))  # 2pm
-ONCALL_SHIFT_END_HOUR = int(os.environ.get("ONCALL_SHIFT_END_HOUR", "23"))  # 11pm
+ONCALL_OFFHOURS_START_HOUR = int(os.environ.get("ONCALL_OFFHOURS_START_HOUR", "23"))  # 11pm
+ONCALL_OFFHOURS_END_HOUR = int(os.environ.get("ONCALL_OFFHOURS_END_HOUR", "7"))  # 7am
 
 # This task is scheduled hourly (see `seed_periodic_tasks`), and only actually
-# rolls during the shift window above. Targeting roughly one page per two days
-# of practice means an expected value of ~1 event per 48 in-shift hourly runs
-# (9 shift-hours/day * 2 days = 18 checks — see `PAGE_PROBABILITY_PER_HOURLY_CHECK`
-# below, sized off the shift length rather than a flat 24h day).
-PAGE_PROBABILITY_PER_HOURLY_CHECK = 1 / 18
+# rolls when `_within_page_window` is true. Eligible hours per week: 5 weekday
+# nights * 8 off-hours + 2 full weekend days * 24h = 88 of 168 hours (~12.6/day
+# on average). Targeting roughly one page per two days of practice means an
+# expected value of ~1 event per ~25 eligible hourly checks.
+PAGE_PROBABILITY_PER_HOURLY_CHECK = 1 / 25
 
 
-def _within_shift_hours() -> bool:
-    hour = datetime.now(tz=ONCALL_TIMEZONE).hour
-    return ONCALL_SHIFT_START_HOUR <= hour < ONCALL_SHIFT_END_HOUR
+def _within_page_window(now: datetime | None = None) -> bool:
+    now = now or datetime.now(tz=ONCALL_TIMEZONE)
+    if now.weekday() >= 5:  # Saturday=5, Sunday=6 — paged all weekend
+        return True
+    hour = now.hour
+    # Off-hours wraps past midnight (e.g. 23:00-06:59), so this is an OR, not a range.
+    return hour >= ONCALL_OFFHOURS_START_HOUR or hour < ONCALL_OFFHOURS_END_HOUR
 
 # A single push only buzzes a phone briefly by OS design — no amount of ntfy
 # "priority" tuning turns a normal notification into an alarm-clock-grade
@@ -164,7 +171,7 @@ def replenish_ticket() -> str:
 
 @shared_task
 def maybe_page_oncall() -> str | None:
-    if not _within_shift_hours():
+    if not _within_page_window():
         return None
     if random.random() >= PAGE_PROBABILITY_PER_HOURLY_CHECK:
         return None

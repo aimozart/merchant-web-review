@@ -1,3 +1,4 @@
+from datetime import datetime
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -189,6 +190,32 @@ class TicketApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
 
 
+class PageWindowTests(TestCase):
+    """Real on-call pages during off-hours/weekends, not the work shift
+    itself — during the shift you're already present and would just handle
+    things directly."""
+
+    def test_weekday_daytime_is_outside_the_window(self):
+        monday_3pm = datetime(2026, 8, 17, 15, 0, tzinfo=tasks.ONCALL_TIMEZONE)
+        self.assertFalse(tasks._within_page_window(monday_3pm))
+
+    def test_weekday_late_night_is_within_the_window(self):
+        monday_11pm = datetime(2026, 8, 17, 23, 0, tzinfo=tasks.ONCALL_TIMEZONE)
+        self.assertTrue(tasks._within_page_window(monday_11pm))
+
+    def test_weekday_early_morning_is_within_the_window(self):
+        monday_3am = datetime(2026, 8, 17, 3, 0, tzinfo=tasks.ONCALL_TIMEZONE)
+        self.assertTrue(tasks._within_page_window(monday_3am))
+
+    def test_saturday_daytime_is_within_the_window(self):
+        saturday_2pm = datetime(2026, 8, 15, 14, 0, tzinfo=tasks.ONCALL_TIMEZONE)
+        self.assertTrue(tasks._within_page_window(saturday_2pm))
+
+    def test_sunday_daytime_is_within_the_window(self):
+        sunday_2pm = datetime(2026, 8, 16, 14, 0, tzinfo=tasks.ONCALL_TIMEZONE)
+        self.assertTrue(tasks._within_page_window(sunday_2pm))
+
+
 class ReplenishAndPagingTaskTests(TestCase):
     """
     Docker/LocalStack are deliberately mocked as unreachable in every test here
@@ -210,7 +237,7 @@ class ReplenishAndPagingTaskTests(TestCase):
         self.assertEqual(ticket.status, "open")
         self.assertEqual(ticket.source, "fault_injection")
 
-    @patch("ops.tasks._within_shift_hours", return_value=True)
+    @patch("ops.tasks._within_page_window", return_value=True)
     @patch("ops.tasks.random.random", return_value=0.99)
     def test_maybe_page_oncall_usually_does_nothing(self, mock_random, mock_shift):
         before = Ticket.objects.count()
@@ -221,8 +248,8 @@ class ReplenishAndPagingTaskTests(TestCase):
         self.assertEqual(Ticket.objects.count(), before)
 
     @patch("ops.tasks.random.random", return_value=0.0)
-    def test_maybe_page_oncall_never_fires_outside_shift_hours(self, mock_random):
-        with patch("ops.tasks._within_shift_hours", return_value=False):
+    def test_maybe_page_oncall_never_fires_outside_page_window(self, mock_random):
+        with patch("ops.tasks._within_page_window", return_value=False):
             result = tasks.maybe_page_oncall()
 
         self.assertIsNone(result)
@@ -232,7 +259,7 @@ class ReplenishAndPagingTaskTests(TestCase):
     @patch("ops.tasks.NTFY_TOPIC", "test-topic")
     @patch("ops.tasks._localstack_reachable", return_value=False)
     @patch("ops.tasks._docker_reachable", return_value=False)
-    @patch("ops.tasks._within_shift_hours", return_value=True)
+    @patch("ops.tasks._within_page_window", return_value=True)
     @patch("ops.tasks.random.random", return_value=0.0)
     def test_maybe_page_oncall_fires_and_stops_once_acknowledged(
         self, mock_random, mock_shift, mock_docker, mock_localstack, mock_post, mock_sleep
@@ -259,7 +286,7 @@ class ReplenishAndPagingTaskTests(TestCase):
     @patch("ops.tasks.NTFY_TOPIC", "")
     @patch("ops.tasks._localstack_reachable", return_value=False)
     @patch("ops.tasks._docker_reachable", return_value=False)
-    @patch("ops.tasks._within_shift_hours", return_value=True)
+    @patch("ops.tasks._within_page_window", return_value=True)
     @patch("ops.tasks.random.random", return_value=0.0)
     def test_maybe_page_oncall_fires_silently_without_ntfy_topic_configured(
         self, mock_random, mock_shift, mock_docker, mock_localstack, mock_post, mock_sleep
