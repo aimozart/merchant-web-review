@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+db.sqlite3
+.env
+staticfiles/
+node_modules/
+frontend/dist/
+.pulumi/
+Pulumi.*.yaml.bak
+*.log

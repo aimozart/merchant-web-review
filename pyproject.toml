@@ -1,0 +1,13 @@
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+# Correctness/style basics only — pyflakes, real pycodestyle errors, import
+# sorting, and pyupgrade. Deliberately not opting into the stricter opinionated
+# categories (bugbear, bandit, datetime-tz, blind-except, etc.): several
+# patterns in this codebase are intentional (broad `except Exception` for
+# fallback resilience in reviews/llm.py, `subprocess.run` without `check=`
+# because the return code is inspected manually in ops/network_faults.py) and
+# would just be permanently-ignored noise rather than real signal.
+select = ["E4", "E7", "E9", "F", "I", "UP"]

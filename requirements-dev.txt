@@ -1,0 +1,4 @@
+# Dev/CI-only tooling — not needed to run the app itself, so kept out of
+# requirements.txt to keep the runtime dependency set (and container image)
+# minimal.
+ruff==0.16.3
